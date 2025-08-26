@@ -2,6 +2,7 @@ import Twig from "twig"
 import { join, resolve, dirname } from "node:path"
 import { existsSync, readdirSync } from "node:fs"
 import { normalizePath } from "vite"
+import { glob } from "glob"
 
 const { twig } = Twig
 
@@ -53,19 +54,63 @@ const resolveFile = (directory, file) => {
   return normalizePath(resolve(directory, file))
 }
 
-const pluckIncludes = (tokens) => {
+const analyzeIncludeExpression = (stack, baseDir) => {
+  if (stack.type === 'Twig.expression.type.binary' && stack.operator === '~') {
+    const pattern = buildPatternFromConcatenation(stack)
+    if (pattern) {
+      return glob.sync(pattern, { cwd: baseDir })
+    }
+  }
+
+  return typeof stack.value === 'string' ? [stack.value] : []
+}
+const buildPatternFromConcatenation = (expression) => {
+  if (expression.type === 'Twig.expression.type.binary' && expression.operator === '~') {
+    const left = extractStringFromExpression(expression.left)
+    const right = extractStringFromExpression(expression.right)
+
+    if (left && right) {
+      return `${left}*${right}`
+    }
+    // Handle more complex concatenations
+    if (left) return `${left}*`
+    if (right) return `*${right}`
+  }
+  return null
+}
+
+const extractStringFromExpression = (expr) => {
+  if (expr.type === 'Twig.expression.type.string') {
+    return expr.value
+  }
+  // Could extend to handle more expression types
+  return null
+}
+
+const pluckIncludes = (tokens, baseDir = '') => {
   return [
     ...tokens
       .filter((token) => includeTokenTypes.includes(token.token?.type))
       .reduce(
-        (carry, token) => [
-          ...carry,
-          ...token.token.stack.map((stack) => stack.value),
-        ],
+        (carry, token) => {
+          const discovered = []
+
+          for (const stack of token.token.stack) {
+            const templates = analyzeIncludeExpression(stack, baseDir)
+            discovered.push(...templates)
+          }
+
+          return [...carry, discovered]
+        },
+
+
+          // ...carry,
+          // ...token.token.stack.map((stack) => stack.value),
+
         []
       ),
     ...tokens.reduce(
-      (carry, token) => [...carry, ...pluckIncludes(token.token?.output || [])],
+      (carry, token) => [...carry, ...pluckIncludes(token.token?.output || [], baseDir)],
       []
     ),
   ].filter((value, index, array) => {
@@ -96,7 +141,7 @@ const resolveNamespaceOrComponent = (namespaces, template) => {
   return expandedPath
 }
 
-const compileTemplate = (id, file, { namespaces }) => {
+const compileTemplate = (id, file, { namespaces }, baseDir) => {
   return new Promise((resolve, reject) => {
     const options = { namespaces, rethrow: true, allowInlineIncludes: true }
     twig({
@@ -110,7 +155,7 @@ const compileTemplate = (id, file, { namespaces }) => {
           return
         }
         resolve({
-          includes: pluckIncludes(template.tokens),
+          includes: pluckIncludes(template.tokens, baseDir),
           code: template.compile(options),
         })
       },
@@ -174,7 +219,8 @@ const plugin = (options = {}) => {
           seen = {}
 
         try {
-          const result = await compileTemplate(id, id, options).catch(
+          const baseDir = dirname(id)
+          const result = await compileTemplate(id, id, options, baseDir).catch(
             errorHandler(id)
           )
           if ("map" in result) {
@@ -194,7 +240,7 @@ const plugin = (options = {}) => {
                     resolveNamespaceOrComponent(options.namespaces, template)
                   )
                   if (!(template in seen)) {
-                    return compileTemplate(template, file, options)
+                    return compileTemplate(template, file, options, baseDir)
                       .catch(errorHandler(template, false))
                       .then(({ code, includes }) => {
                         seen[template] = code
@@ -288,3 +334,7 @@ const plugin = (options = {}) => {
 }
 
 export default plugin
+
+export {
+  buildPatternFromConcatenation
+}
