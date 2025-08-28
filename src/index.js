@@ -115,18 +115,6 @@ const analyzeDynamicIncludes = (stack, baseDirectory, namespaces) => {
   return potentialIncludes
 }
 
-const validateTemplatePath = (template, baseDirectory, namespaces) => {
-  try {
-    const resolvedPath = resolveFile(
-      baseDirectory,
-      resolveNamespaceOrComponent(namespaces, template)
-    )
-    return existsSync(resolvedPath)
-  } catch (e) {
-    return false
-  }
-}
-
 const pluckIncludes = (tokens, baseDirectory = '', namespaces = {}) => {
   const allIncludes = tokens.flatMap(token => {
     const includes = []
@@ -299,7 +287,6 @@ const plugin = (options = {}) => {
           )
           embed = Object.keys(seen)
             .filter((template) => template !== "_self")
-            .filter((template) => validateTemplatePath(template, dirname(id), options.namespaces))
             .map(
               (template) => {
                 const resolvedPath = resolveFile(
