@@ -44,12 +44,10 @@ const findIncludesInDir = (searchPath, originalBasePath) => {
       return []
     }
 
-    const files = readdirSync(searchPath, { withFileTypes: true })
+    const files = readdirSync(searchPath, { recursive: true })
     return files
-      .filter(file => file.isFile() && file.name.endsWith('.twig'))
-      .map(file => {
-        return join(originalBasePath, file.name).replace(/\\/g, '/')
-      })
+      .filter(file => file.endsWith('.twig'))
+      .map(file => join(originalBasePath, file).replace(/\\/g, '/'))
   } catch (e) {
     console.warn(`Could not scan directory for dynamic includes: ${searchPath}`, e.message);
     return [];
