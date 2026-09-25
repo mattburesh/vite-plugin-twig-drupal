@@ -37,6 +37,23 @@ const findInChildDirectories = (directory, component) => {
   return null
 }
 
+// Scan a directory for .twig files
+const findIncludesInDir = (searchPath, originalBasePath) => {
+  try {
+    if (!existsSync(searchPath)) {
+      return []
+    }
+
+    const files = readdirSync(searchPath, { recursive: true })
+    return files
+      .filter(file => file.endsWith('.twig'))
+      .map(file => join(originalBasePath, file).replace(/\\/g, '/'))
+  } catch (e) {
+    console.warn(`Could not scan directory for dynamic includes: ${searchPath}`, e.message);
+    return [];
+  }
+}
+
 const resolveFile = (directory, file) => {
   const filesToTry = [file, `${file}.twig`, `${file}.html.twig`]
   for (const ix in filesToTry) {
@@ -53,24 +70,78 @@ const resolveFile = (directory, file) => {
   return normalizePath(resolve(directory, file))
 }
 
-const pluckIncludes = (tokens) => {
-  return [
-    ...tokens
-      .filter((token) => includeTokenTypes.includes(token.token?.type))
-      .reduce(
-        (carry, token) => [
-          ...carry,
-          ...token.token.stack.map((stack) => stack.value),
-        ],
-        []
-      ),
-    ...tokens.reduce(
-      (carry, token) => [...carry, ...pluckIncludes(token.token?.output || [])],
-      []
-    ),
-  ].filter((value, index, array) => {
-    return array.indexOf(value) === index
+// Check if a sequence of tokens matches the 'string' ~ variable pattern
+const isConcatenationPattern = (stack, index) => {
+  const current = stack[index]
+  const next = stack[index + 1]
+  const operator = stack[index + 2]
+
+  return (
+    current?.type === 'Twig.expression.type.string' &&
+    next?.type === 'Twig.expression.type.variable' &&
+    operator?.type === 'Twig.expression.type.operator.binary' &&
+    operator?.value === '~'
+  )
+}
+
+// Analyze a token's expression stack to find concatenation patterns, and
+// resolve potential file paths from dynamic includes
+const analyzeDynamicIncludes = (stack, baseDirectory, namespaces) => {
+  if (!stack || stack.length < 3) return []
+
+  const potentialIncludes = []
+
+  // Look for concatenation patterns: string + variable + ~ operator
+  for (let i = 0; i < stack.length - 2; i++) {
+    if (isConcatenationPattern(stack, i)) {
+      const basePath = stack[i].value
+
+      let searchPath
+      if (basePath.startsWith('@') || basePath.includes(':')) {
+        searchPath = resolveNamespaceOrComponent(namespaces, basePath)
+      } else {
+        searchPath = resolve(baseDirectory, basePath)
+      }
+
+      if (searchPath) {
+        const foundIncludes = findIncludesInDir(searchPath, basePath)
+        potentialIncludes.push(...foundIncludes)
+      }
+    }
+  }
+
+  return potentialIncludes
+}
+
+const pluckIncludes = (tokens, baseDirectory = '', namespaces = {}) => {
+  const allIncludes = tokens.flatMap(token => {
+    const includes = []
+
+    if (includeTokenTypes.includes(token.token?.type)) {
+      const stack = token.token.stack || []
+      const hasConcatenation = stack.some(
+        item => item.type === 'Twig.expression.type.operator.binary' && item.value === '~'
+      )
+
+      if (hasConcatenation) {
+        includes.push(...analyzeDynamicIncludes(stack, baseDirectory, namespaces))
+      } else {
+        const staticPaths = stack
+          .filter(item => item.type === 'Twig.expression.type.string')
+          .map(item => item.value)
+        includes.push(...staticPaths)
+      }
+    }
+
+    const nestedTokens = token.token?.output || []
+    if (nestedTokens.length > 0) {
+      includes.push(...pluckIncludes(nestedTokens, baseDirectory, namespaces))
+    }
+
+    return includes
   })
+
+  return [...new Set(allIncludes)]
 }
 
 const resolveNamespaceOrComponent = (namespaces, template) => {
@@ -110,7 +181,7 @@ const compileTemplate = (id, file, { namespaces }) => {
           return
         }
         resolve({
-          includes: pluckIncludes(template.tokens),
+          includes: pluckIncludes(template.tokens, dirname(file), namespaces),
           code: template.compile(options),
         })
       },
@@ -215,11 +286,13 @@ const plugin = (options = {}) => {
           embed = Object.keys(seen)
             .filter((template) => template !== "_self")
             .map(
-              (template) =>
-                `import '${resolveFile(
+              (template) => {
+                const resolvedPath = resolveFile(
                   dirname(id),
                   resolveNamespaceOrComponent(options.namespaces, template)
-                )}';`
+                )
+                return `import '${resolvedPath}';`
+              }
             )
             .join("\n")
 
